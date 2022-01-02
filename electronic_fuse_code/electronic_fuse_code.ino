@@ -56,6 +56,8 @@ SOFTWARE.
 
 #define AMOUNT_MEASUREMENTS             10      // how many measurements are stored in order to calculate a rolling average
 #define TRIGGER_DELAY_INTERVAL          50      // [ms] how many milliseconds will td be increased when turning the knob
+#define PULSELENGTH_INTERVAL            10      // [ms] how many milliseconds will pulselength be increased when turning the knob
+#define BTN_DEBOUNCE_DELAY              250     // [ms] during this time the software will not respond to a pressed button after a button was pressed
 #define CURRENT_THRESHOLD_INTERVAL      0.2     // [A]  how many Amps will th be increased when turning the knob
 #define CURRENT_SUM_THRESHOLD_INTERVAL  0.5     // [A]  how many Amps will the summmarized current threshold be increased when turning the knob
 #define DISPLAY_UPDATE_INTERVAL         1000    // [ms] how often will Vbatt and the actual current values be updated on the LCD. Too many refreshes may affect usability of the rotary encoder.
@@ -380,9 +382,9 @@ void setCursorIndicator(void)
         }
         else if(cursor_row == 3)                   // change pulse length for welding
         {
-          weld_pulselength += RotEncPos*TRIGGER_DELAY_INTERVAL;
+          weld_pulselength += RotEncPos*PULSELENGTH_INTERVAL;
           if(weld_pulselength < 0) weld_pulselength = 0;
-          if(weld_pulselength > 990) weld_pulselength = 1000 - TRIGGER_DELAY_INTERVAL;
+          if(weld_pulselength > 990) weld_pulselength = 1000 - PULSELENGTH_INTERVAL;
           RotEncPos = 0;
           printTimeonLCD(3, weld_pulselength);
         }
@@ -441,7 +443,7 @@ float meanValue(uint8_t hss, float new_cur)
 void checkHIDswitch(uint8_t pin, uint8_t hss)
 {
   uint32_t buttondelay = millis() - button_timer; 
-  if(digitalRead(pin) && (buttondelay > 250)){
+  if(digitalRead(pin) && (buttondelay > BTN_DEBOUNCE_DELAY)){
     switch (hss_status[hss]){
       case EF_OFF:
         hss_status[hss] = EF_ON;
@@ -625,8 +627,8 @@ void updateSumCurThrs(void)
 void checkSpotWeldButton(void)
 {
   uint32_t buttondelay = millis() - button_timer; 
-  if(digitalRead(SWITCHPIN_HSS3) && (buttondelay > 250)){
-    button_timer = millis();
+  if(digitalRead(SWITCHPIN_HSS3) && (buttondelay > BTN_DEBOUNCE_DELAY)){
+    
     // Button was pressed
     
     // Initial short pulse to heat up the metal
@@ -641,6 +643,7 @@ void checkSpotWeldButton(void)
         delay(weld_pulselength);
         HSS.switchHxOff(3);
         
+    button_timer = millis();
   }
 }
 
