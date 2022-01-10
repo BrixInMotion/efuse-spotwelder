@@ -4,7 +4,7 @@ Modified code for the Arduino EFuse using Infineon BTS7002 High-Side-Switches to
 * Original EFuse project and instructions can be found here: https://www.hackster.io/Infineon_Team/electronic-fuse-with-bts7002-1epp-a57d3a
 * Instruction how to build the spot welder here: https://www.instructables.com/Building-a-Spot-Welding-Machine-From-a-Microwave-O/
 
-Instead of the China-controller baord, the EFuse together with a relay can be used.
+Instead of the China-controller board, the EFuse together with a relay can be used.
 
 <img src="pictures/spot-welder.jpg" width="500">
 
