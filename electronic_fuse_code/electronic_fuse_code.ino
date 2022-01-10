@@ -4,10 +4,15 @@
  * Specs:
  *  - Input voltage: 7-28V DC
  *  - Max. input current: 60A
- *  - Max. output current: 3 x 21A
+ *  - Max. output current: 2 x 21A
+ *  - Channel 3 is used to produce a pulse-pattern for spot welding. Pulslength of second welding pulse is adjustable, init pulse is fixed.
  *  
  * @copyright   Copyright (c) 2021 Infineon Technologies AG   
- * @version     1.0.2
+ * @version     1.1.0
+ * 
+ * V1.1.0: 2 Channel Efuse, 3rd Channel used as pulsed output for spot welding
+ * V1.0.2: Fixed EEProm initialization when using new Arduino
+ * V1.0.1: First Release
  * 
  * MIT License
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -51,16 +56,20 @@ SOFTWARE.
 
 #define AMOUNT_MEASUREMENTS             10      // how many measurements are stored in order to calculate a rolling average
 #define TRIGGER_DELAY_INTERVAL          50      // [ms] how many milliseconds will td be increased when turning the knob
+#define PULSELENGTH_INTERVAL            10      // [ms] how many milliseconds will pulselength be increased when turning the knob
+#define BTN_DEBOUNCE_DELAY              250     // [ms] during this time the software will not respond to a pressed button after a button was pressed
 #define CURRENT_THRESHOLD_INTERVAL      0.2     // [A]  how many Amps will th be increased when turning the knob
 #define CURRENT_SUM_THRESHOLD_INTERVAL  0.5     // [A]  how many Amps will the summmarized current threshold be increased when turning the knob
 #define DISPLAY_UPDATE_INTERVAL         1000    // [ms] how often will Vbatt and the actual current values be updated on the LCD. Too many refreshes may affect usability of the rotary encoder.
 #define MAX_CURRENT_THRESHOLD           21.0    // [A]  the top limit for the current threshold when turning the knob
+#define NR_OF_CHANNELS                  2       // How many channles are used for Overcurrent detection
 
 // -----------------------------------------------------------------------------------------------------------------------------------------------------
 
 #define EEPROM_ADDRESS_TRIGGER_DELAY    0
 #define EEPROM_ADDRESS_CUR_THRES_SUM    (sizeof(int))
-#define EEPROM_ADDRESS_CUR_THRESHOLD    (sizeof(int) + sizeof(float))  
+#define EEPROM_ADDRESS_CUR_THRESHOLD    (sizeof(int) + sizeof(float))
+#define EEPROM_ADDRESS_PULSELENGTH      (2*sizeof(int) + 3*sizeof(float))
 // -----------------------------------------------------------------------------------------------------------------------------------------------------
 
 enum _rotStatus{
@@ -113,7 +122,7 @@ uint8_t       hss_status[4] = {1,0,0,0};                      // Another status 
 uint8_t       cur_meas_index[4] = {0,0,0,0};                  // points to the actual position in the mean value measurement array
 int           oldRotEncPos, RotEncPos = 0;                    // Position index of the rotary encoder
 uint8_t       rotStatus = SCAN;                               // Status of the Rotary encoder (to switch on or off the interrupt routine)
-int           trigger_delay = 100;                            // Time in milliseconds, after which the HSS switches off after an overcurrent event.
+uint16_t      trigger_delay = 100;                            // Time in milliseconds, after which the HSS switches off after an overcurrent event.
 uint32_t      display_update_timer = 0;                       // counter variable to update the LCD information in constant time intervalls
 uint32_t      button_timer = 0;                               // helps to estimate release time for the HID switches
 uint32_t      current_measurement_timer = 0;                  // counter variable to scan for an overcurrent event with a specific delay
@@ -121,7 +130,9 @@ uint8_t       cursor_mode = SELECT_VALUE;                     // Cursor has to m
 uint8_t       cursor_row = 0;                                 // [0:3] in which row is the cursor
 bool          debugPin_Stat = 0;                              // Status of debug pin
 bool          current_exceeded_flag = 0;                      // Set to one as soon as current threshold was exceeded
-
+uint16_t      weld_pulselength = 100;                         // Pulse duration of the welding
+uint16_t      init_pulselength = 50;                          // Pulse duration of the initial heat-up pulse
+  
 // ---------------- String arrays (for display) ----------------------------------------------------------------------------------------------------------
 const String  hss_status_TXT[4] = {" OFF ", " ON  ", " OVC "};
 const String  EF_errorMessages[8] = {"NORMAL", "- OVERLOAD -      ", "- SHORT TO GND -  ", "- OVERTEMPERATURE-", "- SHORT TO VSS -  ", "- OPEN LOAD -     ", "- UNDER LOAD -    ", "- INVERSE CURRENT-"};
@@ -135,7 +146,7 @@ void setup()
     Serial.begin(115200);
  
     HSS.init();                                   // Initialization of the High-Side-Switch-Board
-    Serial.println("High-Side-Switch is initialized");
+    Serial.println(F("High-Side-Switch is initialized"));
     pinMode(ROT_ENCODER_BTN, INPUT_PULLUP);
     pinMode(SWITCHPIN_HSS1, INPUT);
     pinMode(SWITCHPIN_HSS2, INPUT);
@@ -182,7 +193,7 @@ void setup()
     { 
       address = EEPROM_ADDRESS_CUR_THRESHOLD + (i-1)*sizeof(float);
       EEPROM.get(address, cur_threshold[i]);
-      if((cur_threshold[i] < 0.2) || (cur_threshold[i] > MAX_CURRENT_THRESHOLD))   // If EEprom reads garbage, reset to default value
+      if((cur_threshold[i] < CURRENT_THRESHOLD_INTERVAL) || (cur_threshold[i] > MAX_CURRENT_THRESHOLD))   // If EEprom reads garbage, reset to default value
       {
         cur_threshold[i] = 1.0;
         EEPROM.put(address, cur_threshold[i]);
@@ -196,14 +207,14 @@ void setup()
     lcd.init();
     lcd.backlight();
     lcd.setCursor(3,0);
-    lcd.print("Electronic Fuse");
+    lcd.print(F("Electronic Fuse"));
     lcd.setCursor(2,1);
-    lcd.print("Infineon BTS7002");
+    lcd.print(F("Infineon BTS7002"));
     lcd.setCursor(1,3);
-    lcd.print("max current: ");
+    lcd.print(F("max current: "));
     if(cur_threshold_sum < 10.0) lcd.print(" ");
     lcd.print(cur_threshold_sum, 1);
-    lcd.print("A");
+    lcd.print(F("A"));
     while(digitalRead(ROT_ENCODER_BTN))
     {
       Interrupt_routine();
@@ -212,7 +223,7 @@ void setup()
     address = EEPROM_ADDRESS_CUR_THRES_SUM;
     EEPROM.put(address, cur_threshold_sum);
 
-    printMenu(4);                           // print menu for all 4 lines
+    printMenu();                           // print menu for all 4 lines
     display_update_timer = millis();
     current_measurement_timer = millis();
 }
@@ -225,7 +236,7 @@ void loop()
     Interrupt_routine();                  // check if rotary encoder was turned
     setCursorIndicator();                 // check if cursor position or blink mode needs to be updated on the LCD
     
-    for(uint8_t hss = 1; hss <= 3; hss++) // measure the current in all 3 high-side switches
+    for(uint8_t hss = 1; hss <= NR_OF_CHANNELS; hss++) // measure the current in all 3 high-side switches
     {
       if(checkCurrent(hss))
       {
@@ -243,15 +254,15 @@ void loop()
     {
        
       // Check the single outputs for overcurrent
-      for(uint8_t hss = 1; hss <= 3; hss++)
+      for(uint8_t hss = 1; hss <= NR_OF_CHANNELS; hss++)
       {
         if(checkCurrent(hss)){
           HSS.switchHxOff(hss);             // If threshold was exceeded, switch HSS off
           hss_status[hss] = EF_OVERCURRENT;
           printHIDswitchStatonLCD(hss);     //LCD print OVC
-          Serial.print("HSS ");
+          Serial.print(F("HSS "));
           Serial.print(hss);
-          Serial.println(" switched OFF after overcurrent event");
+          Serial.println(F(" switched OFF after overcurrent event"));
         }
         //checkHSSDiag(hss);                  // See, if another unusual error occured and print error message
       }
@@ -261,7 +272,7 @@ void loop()
       if( current_sum > cur_threshold_sum)
       {
         
-        for(uint8_t hss = 1; hss <= 3; hss++)
+        for(uint8_t hss = 1; hss <= NR_OF_CHANNELS; hss++)
         {
           HSS.switchHxOff(hss);
           hss_status[hss] = EF_OVERCURRENT;
@@ -273,7 +284,8 @@ void loop()
  
     checkHIDswitch(SWITCHPIN_HSS1, 1);    // check, if one of the three red buttons is pressed
     checkHIDswitch(SWITCHPIN_HSS2, 2);
-    checkHIDswitch(SWITCHPIN_HSS3, 3);
+    //checkHIDswitch(SWITCHPIN_HSS3, 3);
+    checkSpotWeldButton();
  }
 
 // --------------- Function definitions --------------------------------------------------------------------------------------------------------------------
@@ -289,7 +301,7 @@ void checkTimer(void)
     if((millis() - display_update_timer) > DISPLAY_UPDATE_INTERVAL)   // update voltage and current information every second
     {
       printBattVoltonLCD();
-      for(uint8_t hss = 1; hss <= 3; hss++)
+      for(uint8_t hss = 1; hss <= NR_OF_CHANNELS; hss++)
       {
         if(hss_status[hss] != EF_BTS_ERROR)
         {
@@ -329,6 +341,10 @@ void checkRotSwitch(void)
     {
       EEPROM.put(EEPROM_ADDRESS_TRIGGER_DELAY, trigger_delay);
     }
+    else if(cursor_row == 3)
+    {
+      EEPROM.put(EEPROM_ADDRESS_PULSELENGTH, weld_pulselength);
+    }
     else
     {
       uint8_t address = EEPROM_ADDRESS_CUR_THRESHOLD + (cursor_row-1) * sizeof(float);
@@ -356,18 +372,26 @@ void setCursorIndicator(void)
       }
       else if(cursor_mode == CHANGE_VALUE)    // change the value where the cursor blinks
       {
-        if(cursor_row == 0)                   // change time
+        if(cursor_row == 0)                   // change trigger time
         {
           trigger_delay += RotEncPos*TRIGGER_DELAY_INTERVAL;
           if(trigger_delay < 0) trigger_delay = 0;
           if(trigger_delay > 990) trigger_delay = 1000 - TRIGGER_DELAY_INTERVAL;
           RotEncPos = 0;
-          printTimeonLCD();
+          printTimeonLCD(0, trigger_delay);
+        }
+        else if(cursor_row == 3)                   // change pulse length for welding
+        {
+          weld_pulselength += RotEncPos*PULSELENGTH_INTERVAL;
+          if(weld_pulselength < 0) weld_pulselength = 0;
+          if(weld_pulselength > 990) weld_pulselength = 1000 - PULSELENGTH_INTERVAL;
+          RotEncPos = 0;
+          printTimeonLCD(3, weld_pulselength);
         }
         else                                  //change thresholds
         {
           cur_threshold[cursor_row] += RotEncPos*CURRENT_THRESHOLD_INTERVAL;
-          if(cur_threshold[cursor_row] < 0.1)  cur_threshold[cursor_row] = 0.2;
+          if(cur_threshold[cursor_row] < 0.1)  cur_threshold[cursor_row] = CURRENT_THRESHOLD_INTERVAL;
           if(cur_threshold[cursor_row] > MAX_CURRENT_THRESHOLD)  cur_threshold[cursor_row] = MAX_CURRENT_THRESHOLD;
           RotEncPos = 0;
           printCurThresholdonLCD(cursor_row);
@@ -419,22 +443,22 @@ float meanValue(uint8_t hss, float new_cur)
 void checkHIDswitch(uint8_t pin, uint8_t hss)
 {
   uint32_t buttondelay = millis() - button_timer; 
-  if(digitalRead(pin) && (buttondelay > 250)){
+  if(digitalRead(pin) && (buttondelay > BTN_DEBOUNCE_DELAY)){
     switch (hss_status[hss]){
       case EF_OFF:
         hss_status[hss] = EF_ON;
         HSS.switchHxOn(hss);
-        Serial.print("HSS ");
+        Serial.print(F("HSS "));
         Serial.print(hss);
-        Serial.println(" switched ON");
+        Serial.println(F(" switched ON"));
         printHIDswitchStatonLCD(hss);   //LCD print on
         break;
       case EF_ON:
         hss_status[hss] = EF_OFF;
         HSS.switchHxOff(hss);
-        Serial.print("HSS ");
+        Serial.print(F("HSS "));
         Serial.print(hss);
-        Serial.println(" switched OFF");
+        Serial.println(F(" switched OFF"));
         printHIDswitchStatonLCD(hss);     //LCD print off
         cur_measurements_avg[hss] = 0;
         for(uint8_t i = 0; i < AMOUNT_MEASUREMENTS; i++){
@@ -483,12 +507,12 @@ void checkHSSDiag(uint8_t hss)
     lcd.setCursor(2, hss);
     lcd.print(EF_errorMessages[switchStatus]);
     hss_status[hss] = EF_BTS_ERROR;
-    Serial.print("Diagnosis status of HSS "); Serial.print(hss); Serial.print(": "); Serial.println(switchStatus); 
+    Serial.print(F("Diagnosis status of HSS ")); Serial.print(hss); Serial.print(": "); Serial.println(switchStatus); 
   }
   else if(hss_status[hss] == EF_BTS_ERROR)     // Status changed from BTS_ERROR to NORMAL again
   {
     hss_status[hss] = EF_OFF;
-    printMenu(hss);
+    printMenu();
   }
 }
 
@@ -498,64 +522,47 @@ void checkHSSDiag(uint8_t hss)
  * |BATT 12.32V td 100ms|
  * |1 ON  18.3A th19.0A |
  * |2 OFF  0.0A th 1.0A |
- * |3 OVC  0.0A th 5.4A |
+ * |SP Pulselength 150ms|
  *  ____________________
  *  
  *  print either a single line if value [0;3] or all lines [>3]
  */
-void printMenu(int row)
+void printMenu()
 {
   float val = 0.0;
-  if(row == 0)
-  {
-    lcd.setCursor(0,0);
-    lcd.print("Batt ");
-    printBattVoltonLCD();
-    lcd.print("V td ");
-    printTimeonLCD();
-    lcd.print("ms");
-  }
-  else if(row > 0 && row < 4)
-  {
-      lcd.setCursor(0,row);
-      lcd.print(row);
-      printHIDswitchStatonLCD(row);
-      printCuronLCD(row);
-      lcd.print("A Th");
-      printCurThresholdonLCD(row);
-      lcd.print("A");
-  }
-  else
-  {
     lcd.clear();
     
     lcd.setCursor(0,0);
-    lcd.print("Batt ");
+    lcd.print(F("Batt "));
     printBattVoltonLCD();
-    lcd.print("V td ");
-    printTimeonLCD();
-    lcd.print("ms");
+    lcd.print(F("V td "));
+    printTimeonLCD(0, trigger_delay);
+    lcd.print(F("ms"));
 
-    for(int x=1; x<4; x++)
+    for(int x=1; x <= NR_OF_CHANNELS; x++)
     {
       lcd.setCursor(0,x);
       lcd.print(x);
       printHIDswitchStatonLCD(x);
       printCuronLCD(x);
-      lcd.print("A th");
+      lcd.print(F("A th"));
       printCurThresholdonLCD(x);
-      lcd.print("A");
+      lcd.print(F("A"));
     }
-  }
+    lcd.setCursor(0,3);
+    lcd.print(F("SP Pulselength "));
+    printTimeonLCD(3, weld_pulselength);
+    lcd.print("ms");
+    
 }
 
-void printTimeonLCD(void)
+void printTimeonLCD(uint8_t row, uint16_t val)
 {
   lcd.noCursor();
-  lcd.setCursor(15, 0);
-  if(trigger_delay < 100) lcd.print(" ");
-  if(trigger_delay < 10) lcd.print(" ");
-  lcd.print(trigger_delay);
+  lcd.setCursor(15, row);
+  if(val < 100) lcd.print(" ");
+  if(val < 10) lcd.print(" ");
+  lcd.print(val);
 }
 
 /**
@@ -614,6 +621,29 @@ void updateSumCurThrs(void)
   if(rotStatus == WAIT_FOR_RISE)    // As long as one pin is still tied to low, prohibit the interrupt
   {
     if(digitalRead(ROT_ENCODER_A) && digitalRead(ROT_ENCODER_B) && digitalRead(ROT_ENCODER_BTN)) rotStatus = SCAN;
+  }
+}
+
+void checkSpotWeldButton(void)
+{
+  uint32_t buttondelay = millis() - button_timer; 
+  if(digitalRead(SWITCHPIN_HSS3) && (buttondelay > BTN_DEBOUNCE_DELAY)){
+    
+    // Button was pressed
+    
+    // Initial short pulse to heat up the metal
+        HSS.switchHxOn(3);
+        delay(init_pulselength);
+        HSS.switchHxOff(3);
+        
+        delay(init_pulselength);
+        
+    // Second pulse to weld
+        HSS.switchHxOn(3);
+        delay(weld_pulselength);
+        HSS.switchHxOff(3);
+        
+    button_timer = millis();
   }
 }
 
